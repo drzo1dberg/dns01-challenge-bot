@@ -1,347 +1,565 @@
 # dns01-bot
 
-A small Go daemon that automates **Let’s Encrypt wildcard certificates** for Plesk servers using a **DNS-01 challenge** and the **Domain-Robot API** (InterNetX / Domain-Robot).
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-The tool is meant to run on the Plesk host itself and drives everything via:
+> A lightweight Go daemon that automates Let's Encrypt wildcard certificate management for Plesk servers using DNS-01 challenges via the Domain-Robot API.
 
-* `plesk ext sslit` (Plesk “SSL It!” extension)
-* Domain-Robot `/zones` API (to manage `_acme-challenge` TXT records) / external Nameserver you are using
-* A simple `domains.conf` file with the domains to manage
-* Optional cronjob wrapper for regular renewals
+## 🎯 Overview
 
----
+**dns01-bot** eliminates the manual hassle of managing wildcard SSL certificates on Plesk servers. It seamlessly integrates Plesk's SSL It! extension with Domain-Robot's DNS API to:
 
-## Features
+- ✅ Automatically obtain and renew wildcard certificates
+- ✅ Manage DNS-01 ACME challenges programmatically
+- ✅ Monitor certificate expiry and renew proactively
+- ✅ Run unattended via cron for zero-touch operation
 
-* 🔒 Automatically issues / renews **wildcard** Let’s Encrypt certificates
-* 🧠 Decides per domain whether renewal is needed based on **TLS certificate expiry**
-* 🤝 Talks to Domain-Robot API to:
-
-  * find the correct DNS zone
-  * create or update `_acme-challenge` TXT records
-* ⏳ Waits until the TXT record is actually visible via DNS before letting ACME continue
-* 🧾 Simple config:
-
-  * `.env` file with credentials / settings
-  * `domains.conf` with `domain email` pairs
-* 🧰 Can be run:
-
-  * manually (interactive, e.g. with OTP prompt)
-  * via cron wrapper for unattended runs (if the Domain-Robot user does not require OTP)
+Perfect for DevOps teams managing multiple domains on Plesk infrastructure with Domain-Robot DNS.
 
 ---
 
-## How it works
+## 📋 Table of Contents
 
-For each configured domain the bot performs roughly this flow:
-
-1. **Check current certificate**
-
-   * Opens a TLS connection to `<domain>:443`
-   * Reads the server certificate and calculates days until expiry
-   * If the cert is valid for more than `RENEW_BEFORE_DAYS` days, the domain is skipped
-
-2. **Start Let’s Encrypt order in Plesk**
-
-   * Calls:
-
-     ```bash
-     plesk ext sslit --certificate -issue \
-       -domain <domain> \
-       -registrationEmail <email> \
-       -secure-domain \
-       -wildcard
-     ```
-   * Parses the CLI output to extract:
-
-     * `dnsRecordHost` → usually `_acme-challenge`
-     * `dnsRecordValue` → the ACME token
-
-3. **Update DNS via Domain-Robot**
-
-   * Logs in to Domain-Robot `/login` to obtain a JWT token
-   * Fetches zones via `/zones?full=true` and finds the zone for the domain
-   * Fetches zone details via `/zones/{zoneId}`
-   * If a TXT record for `_acme-challenge` exists:
-
-     * Updates it via `PUT /zones/{zoneId}/{recordId}` (multipart form: `name=content`, `value=<token>`)
-   * Otherwise:
-
-     * Creates it via `POST /zones/{zoneId}` with JSON body:
-
-       ```json
-       {
-         "subdomain": "_acme-challenge",
-         "type": "TXT",
-         "content": "<token>",
-         "ttl": 60
-       }
-       ```
-
-4. **Wait for DNS propagation**
-
-   * Repeatedly performs `net.LookupTXT("_acme-challenge.<domain>")`
-   * Sleeps `DNS_CHECK_INTERVAL_SECONDS` between attempts
-   * Stops once the expected token is seen or `DNS_TIMEOUT_SECONDS` is reached
-
-5. **Complete the order in Plesk**
-
-   * Calls:
-
-     ```bash
-     plesk ext sslit --certificate -issue \
-       -domain <domain> \
-       -registrationEmail <email> \
-       -continue
-     ```
-   * On success, the domain is now secured with the new wildcard certificate
-
-All of the above is logged to stdout (or a log file when run via wrapper).
+- [Features](#-features)
+- [How It Works](#-how-it-works)
+- [Prerequisites](#-prerequisites)
+- [Installation](#-installation)
+- [Configuration](#-configuration)
+- [Usage](#-usage)
+- [Automation](#-automation)
+- [Troubleshooting](#-troubleshooting)
+- [Security](#-security)
+- [Contributing](#-contributing)
+- [License](#-license)
 
 ---
 
-## Requirements
+## ✨ Features
 
-* **Plesk Obsidian** with the **SSL It!** extension (`plesk ext sslit`)
-* Go-built binary deployed on the Plesk host
-* Domain-Robot account with:
-
-  * API access enabled
-  * IP of the server whitelisted
-* DNS zones for managed domains hosted at Domain-Robot
-* Root access (or sudo) to install the binary and create config / log files
+- **🔒 Wildcard Certificate Support** - Secure `*.example.com` with a single certificate
+- **🤖 Intelligent Renewal** - Automatically checks certificate expiry and renews when needed
+- **🌐 DNS Automation** - Manages `_acme-challenge` TXT records via Domain-Robot API
+- **⏱️ Smart Propagation Waiting** - Verifies DNS changes before proceeding with ACME validation
+- **📝 Simple Configuration** - Environment variables and plaintext domain list
+- **🔄 Cron-Ready** - Designed for unattended scheduled execution
+- **📊 Detailed Logging** - Comprehensive output for monitoring and debugging
 
 ---
 
-## Installation
+## 🔧 How It Works
 
-1. **Build the binary** (on a dev machine)
+```mermaid
+graph TD
+    A[Start] --> B{Certificate Expiring Soon?}
+    B -->|No| C[Skip Domain]
+    B -->|Yes| D[Request ACME Challenge from Plesk]
+    D --> E[Update DNS TXT Record via Domain-Robot API]
+    E --> F[Wait for DNS Propagation]
+    F --> G{DNS Record Visible?}
+    G -->|No| H{Timeout?}
+    H -->|No| F
+    H -->|Yes| I[Log Error]
+    G -->|Yes| J[Complete ACME Validation in Plesk]
+    J --> K[Certificate Issued]
+    C --> L[End]
+    I --> L
+    K --> L
+```
 
+### Process Flow
+
+For each configured domain:
+
+1. **📅 Certificate Check**
+   - Opens TLS connection to `domain:443`
+   - Extracts certificate expiry date
+   - Skips if > `RENEW_BEFORE_DAYS` remain
+
+2. **🎫 ACME Challenge Initiation**
    ```bash
-   go build -o dns01-bot .
+   plesk ext sslit --certificate -issue -domain example.com -wildcard
    ```
+   - Parses output for `dnsRecordHost` and `dnsRecordValue`
 
-2. **Upload the binary to Plesk**
+3. **🌍 DNS Record Management**
+   - Authenticates with Domain-Robot API
+   - Locates DNS zone for domain
+   - Creates or updates `_acme-challenge` TXT record
 
-   * Upload into some subscription via the Plesk file manager (e.g. `/var/www/vhosts/<subscription>/<domain>/dns01-bot`)
-   * SSH into the server (Web SSH is fine) and move it to a system-wide location:
+4. **⏳ Propagation Verification**
+   - Polls DNS every `DNS_CHECK_INTERVAL_SECONDS`
+   - Validates TXT record matches expected token
+   - Times out after `DNS_TIMEOUT_SECONDS`
 
+5. **✅ Certificate Finalization**
    ```bash
-   cp /var/www/vhosts/<subscription>/<domain>/dns01-bot /usr/local/bin/dns01-bot
-   chmod +x /usr/local/bin/dns01-bot
+   plesk ext sslit --certificate -issue -domain example.com -continue
    ```
-
-3. **Create config directory**
-
-   ```bash
-   mkdir -p /etc/dns01-bot
-   chmod 755 /etc/dns01-bot
-   ```
+   - Completes ACME validation
+   - Installs wildcard certificate in Plesk
 
 ---
 
-## Configuration
+## 📦 Prerequisites
 
-### 1. `domains.conf`
+| Component | Requirement |
+|-----------|-------------|
+| **OS** | Linux (tested on Debian/Ubuntu) |
+| **Control Panel** | Plesk Obsidian with SSL It! extension |
+| **Go** | 1.21+ (for building) |
+| **DNS Provider** | Domain-Robot (InterNetX) with API access |
+| **Permissions** | Root or sudo access |
 
-List of domains to manage and the email used for Let’s Encrypt in Plesk:
+### Domain-Robot Setup
+
+1. Enable API access in your Domain-Robot account
+2. Whitelist your server's IP address
+3. Ensure DNS zones are managed via Domain-Robot
+
+---
+
+## 🚀 Installation
+
+### Option 1: Download Pre-built Binary (Recommended)
 
 ```bash
-cat >/etc/dns01-bot/domains.conf <<'EOF'
-# domain         contact_email
+# Download latest release
+wget https://github.com/yourusername/dns01-bot/releases/latest/download/dns01-bot
+
+# Install system-wide
+sudo mv dns01-bot /usr/local/bin/
+sudo chmod +x /usr/local/bin/dns01-bot
+
+# Verify installation
+dns01-bot --version
+```
+
+### Option 2: Build from Source
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/dns01-bot.git
+cd dns01-bot
+
+# Build binary
+go build -o dns01-bot -ldflags="-s -w" .
+
+# Install
+sudo mv dns01-bot /usr/local/bin/
+sudo chmod +x /usr/local/bin/dns01-bot
+```
+
+### Create Configuration Directory
+
+```bash
+sudo mkdir -p /etc/dns01-bot
+sudo chmod 755 /etc/dns01-bot
+```
+
+---
+
+## ⚙️ Configuration
+
+### 1. Domain List (`domains.conf`)
+
+Create `/etc/dns01-bot/domains.conf`:
+
+```bash
+# Format: domain email
 example.com      admin@example.com
 example.org      noc@example.org
-EOF
+mysite.net       ssl@mysite.net
 ```
 
-Format:
+**Format Rules:**
+- One domain per line
+- Whitespace-separated: `<domain> <email>`
+- Lines starting with `#` are comments
+- Empty lines are ignored
 
-* one domain per line
-* whitespace-separated: `<domain> <email>`
-* `#` at the beginning of a line = comment
+### 2. Environment Configuration (`.env`)
 
----
-
-### 2. `.env`
-
-Environment configuration for the bot:
+Create `/etc/dns01-bot/.env`:
 
 ```bash
-cat >/etc/dns01-bot/.env <<'EOF'
+# Domain-Robot API Credentials
 DR_BASE_URL=https://domain-robot.de/api
-DR_EMAIL=YOUR_DOMAIN_ROBOT_LOGIN
-DR_PASS=YOUR_DOMAIN_ROBOT_PASSWORD
-DR_OTP=   # leave empty if OTP is not required
+DR_EMAIL=your-email@example.com
+DR_PASS=your-password
+DR_OTP=  # Leave empty if OTP not required
 
-# How many days before expiry we renew
-RENEW_BEFORE_DAYS=31
+# Certificate Renewal Settings
+RENEW_BEFORE_DAYS=31  # Renew when ≤ 31 days remain
 
-# DNS wait / polling behaviour
-DNS_TIMEOUT_SECONDS=600
-ACME_TTL_SECONDS=60
-DNS_CHECK_INTERVAL_SECONDS=15
+# DNS Challenge Configuration
+DNS_TIMEOUT_SECONDS=600          # Max wait for DNS propagation (10 min)
+ACME_TTL_SECONDS=60              # TTL for _acme-challenge records
+DNS_CHECK_INTERVAL_SECONDS=15    # Polling interval
 
-# Path to domains.conf
+# Paths
 DOMAINS_CONF=/etc/dns01-bot/domains.conf
-EOF
-
-chmod 600 /etc/dns01-bot/.env   # important: only root can read/write
 ```
 
-#### Environment variables
+**Secure the configuration:**
 
-* `DR_BASE_URL` – Domain-Robot API base (defaults to `https://domain-robot.de/api`)
-* `DR_EMAIL` – Domain-Robot login email
-* `DR_PASS` – Domain-Robot password
-* `DR_OTP` – One-time password (empty if not needed; see helper script below)
-* `RENEW_BEFORE_DAYS` – renew when certificate has **≤ this many** days left (default 31)
-* `DNS_TIMEOUT_SECONDS` – max time to wait for TXT record to show up
-* `ACME_TTL_SECONDS` – TTL for `_acme-challenge` TXT record (default 60)
-* `DNS_CHECK_INTERVAL_SECONDS` – delay between TXT DNS lookups
-* `DOMAINS_CONF` – path to the domain configuration file
+```bash
+sudo chmod 600 /etc/dns01-bot/.env
+sudo chown root:root /etc/dns01-bot/.env
+```
+
+### Configuration Reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DR_BASE_URL` | `https://domain-robot.de/api` | Domain-Robot API endpoint |
+| `DR_EMAIL` | *required* | Domain-Robot login email |
+| `DR_PASS` | *required* | Domain-Robot password |
+| `DR_OTP` | *(empty)* | One-time password (if enabled) |
+| `RENEW_BEFORE_DAYS` | `31` | Renew threshold in days |
+| `DNS_TIMEOUT_SECONDS` | `600` | DNS propagation timeout |
+| `ACME_TTL_SECONDS` | `60` | TXT record TTL |
+| `DNS_CHECK_INTERVAL_SECONDS` | `15` | DNS check interval |
+| `DOMAINS_CONF` | `/etc/dns01-bot/domains.conf` | Domain list path |
 
 ---
 
-## Running the bot (manual)
+## 💻 Usage
 
-For quick tests or a one-off renewal:
+### Manual Execution
+
+For testing or one-off renewals:
 
 ```bash
 cd /etc/dns01-bot
-set -a; . ./.env; set +a
-
-/usr/local/bin/dns01-bot
+set -a; source .env; set +a
+dns01-bot
 ```
 
-Logs are written to stdout. For a **single domain**, just keep only that domain in `domains.conf`.
+**Example output:**
 
----
+```
+2024-01-15 10:30:00 dns01-bot starting
+2024-01-15 10:30:01 Domain-Robot login ok
+2024-01-15 10:30:02 === processing domain example.com ===
+2024-01-15 10:30:03 [cert] example.com expires at 2024-02-10T10:30:00Z (in 26 days)
+2024-01-15 10:30:05 [plesk] challenge for example.com: host=_acme-challenge value=abc123...
+2024-01-15 10:30:06 [dns] creating TXT _acme-challenge.example.com
+2024-01-15 10:30:45 [dns] TXT for _acme-challenge.example.com ok: abc123...
+2024-01-15 10:31:20 === done for example.com ===
+2024-01-15 10:31:20 dns01-bot finished
+```
 
-## OTP helper script (interactive)
+### Interactive Mode (with OTP)
 
-If the Domain-Robot account currently **requires OTP** for login, a small helper script prompts for the OTP and passes it as environment variable to the bot.
+If your Domain-Robot account requires OTP:
 
 ```bash
-cat >/usr/local/bin/run-dns01-bot <<'EOF'
+# Create helper script
+sudo tee /usr/local/bin/run-dns01-bot > /dev/null <<'EOF'
 #!/bin/bash
 set -euo pipefail
 
 cd /etc/dns01-bot
+set -a; source .env; set +a
 
-# Load .env
-set -a
-. ./.env
-set +a
-
-# Ask for OTP from user / password manager
 read -p "Domain-Robot OTP: " DR_OTP
 export DR_OTP
 
-/usr/local/bin/dns01-bot | tee -a /var/log/dns01-bot.log
+dns01-bot | tee -a /var/log/dns01-bot.log
 EOF
 
-chmod +x /usr/local/bin/run-dns01-bot
-touch /var/log/dns01-bot.log
+sudo chmod +x /usr/local/bin/run-dns01-bot
+sudo touch /var/log/dns01-bot.log
 ```
 
-Usage:
+**Usage:**
 
 ```bash
-/usr/local/bin/run-dns01-bot
-# paste the OTP from your authenticator / password manager
+sudo run-dns01-bot
+# Enter OTP when prompted
 ```
 
 ---
 
-## Cron integration (OTP-free accounts)
+## 🤖 Automation
 
-Once you have a Domain-Robot user that does **not** require OTP, you can run the bot via cron.
+### Cron Setup (OTP-Free Accounts)
 
-### 1. Cron wrapper
+For unattended operation without OTP requirement:
+
+**1. Create Cron Wrapper:**
 
 ```bash
-cat >/usr/local/bin/dns01-bot-cron <<'EOF'
+sudo tee /usr/local/bin/dns01-bot-cron > /dev/null <<'EOF'
 #!/bin/bash
 set -euo pipefail
 
 cd /etc/dns01-bot || exit 1
+set -a; source .env; set +a
 
-# Load .env
-set -a
-. ./.env
-set +a
-
-# Run bot, append to log
-/usr/local/bin/dns01-bot >> /var/log/dns01-bot.log 2>&1
+dns01-bot >> /var/log/dns01-bot.log 2>&1
 EOF
 
-chmod +x /usr/local/bin/dns01-bot-cron
-touch /var/log/dns01-bot.log
+sudo chmod +x /usr/local/bin/dns01-bot-cron
+sudo touch /var/log/dns01-bot.log
 ```
 
-### 2. Test cron wrapper manually
+**2. Test Wrapper:**
 
 ```bash
-/usr/local/bin/dns01-bot-cron
-tail -n 100 /var/log/dns01-bot.log
+sudo /usr/local/bin/dns01-bot-cron
+sudo tail -f /var/log/dns01-bot.log
 ```
 
-### 3. Add crontab entry (e.g. every 12 hours)
+**3. Add to Crontab:**
 
 ```bash
-crontab -e
+sudo crontab -e
 
+# Add this line (runs every 12 hours at :00)
 0 */12 * * * /usr/local/bin/dns01-bot-cron
+```
 
-crontab -l
+**Alternative Schedules:**
+
+```bash
+# Daily at 3 AM
+0 3 * * * /usr/local/bin/dns01-bot-cron
+
+# Weekly on Sundays at 2 AM
+0 2 * * 0 /usr/local/bin/dns01-bot-cron
+
+# Twice daily at 6 AM and 6 PM
+0 6,18 * * * /usr/local/bin/dns01-bot-cron
+```
+
+### Log Rotation
+
+Configure logrotate to prevent log file growth:
+
+```bash
+sudo tee /etc/logrotate.d/dns01-bot > /dev/null <<'EOF'
+/var/log/dns01-bot.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+}
+EOF
 ```
 
 ---
 
-## Logging & troubleshooting
+## 🔍 Troubleshooting
 
-* Main log file (when using wrappers): `/var/log/dns01-bot.log`
-* Typical log lines include:
+### Common Issues
 
-  * certificate expiry data
-  * Plesk `sslit` output (including ACME challenge)
-  * DNS actions (create/update TXT)
-  * DNS lookup status while waiting
-* If something fails you’ll see messages like:
+<details>
+<summary><b>❌ "login to Domain-Robot failed"</b></summary>
 
-  * `[plesk] issue failed for ...`
-  * `[dns] upsert TXT failed for ...`
-  * `[dns] waitForDNS failed for ...`
-  * `login to Domain-Robot failed: ...`
+**Possible causes:**
+- Incorrect credentials in `.env`
+- Server IP not whitelisted in Domain-Robot
+- OTP required but not provided
 
-Use these to pinpoint whether the problem is on the Plesk side, Domain-Robot API, or DNS propagation.
+**Solution:**
+```bash
+# Verify credentials
+cat /etc/dns01-bot/.env | grep DR_
+
+# Test API access manually
+curl -X POST https://domain-robot.de/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"your-email","password":"your-pass"}'
+```
+</details>
+
+<details>
+<summary><b>❌ "zone for domain not found"</b></summary>
+
+**Cause:** Domain's DNS zone not managed via Domain-Robot
+
+**Solution:**
+- Verify zone exists in Domain-Robot panel
+- Ensure domain name matches exactly (no typos)
+- Check API user has access to the zone
+</details>
+
+<details>
+<summary><b>❌ "dns timeout for _acme-challenge"</b></summary>
+
+**Possible causes:**
+- DNS propagation slower than expected
+- Nameserver configuration issues
+- TTL too high on existing records
+
+**Solution:**
+```bash
+# Manually verify DNS propagation
+dig TXT _acme-challenge.example.com @8.8.8.8
+
+# Increase timeout in .env
+DNS_TIMEOUT_SECONDS=1200  # 20 minutes
+```
+</details>
+
+<details>
+<summary><b>❌ "plesk issue failed"</b></summary>
+
+**Possible causes:**
+- SSL It! extension not installed
+- Domain not configured in Plesk
+- Insufficient permissions
+
+**Solution:**
+```bash
+# Verify SSL It! extension
+plesk bin extension --list | grep sslit
+
+# Test manual certificate request
+plesk ext sslit --certificate -issue -domain example.com -list
+```
+</details>
+
+### Debug Mode
+
+Enable verbose logging:
+
+```bash
+# Add to .env
+export DEBUG=1
+
+# Run with full output
+dns01-bot 2>&1 | tee debug.log
+```
+
+### Checking Logs
+
+```bash
+# View recent activity
+sudo tail -n 100 /var/log/dns01-bot.log
+
+# Search for errors
+sudo grep -i "error\|failed" /var/log/dns01-bot.log
+
+# Watch live
+sudo tail -f /var/log/dns01-bot.log
+```
 
 ---
 
-## Security considerations
+## 🔐 Security
 
-* `.env` contains API credentials – **must be `chmod 600`** and owned by root.
-* Binary runs as root when triggered from root’s crontab / helper; treat it as privileged code:
+### Best Practices
 
-  * keep it in `/usr/local/bin`
-  * source code should be version controlled / reviewed
-* Logfile `/var/log/dns01-bot.log` may contain:
+- ✅ **Credential Protection**: `.env` must be `chmod 600` and owned by root
+- ✅ **Principle of Least Privilege**: Run as dedicated service user (future enhancement)
+- ✅ **API Key Rotation**: Regularly update Domain-Robot password
+- ✅ **Log Access Control**: Restrict log file permissions
+- ✅ **Source Code Review**: Audit code before deployment
+- ✅ **IP Whitelisting**: Limit Domain-Robot API access to server IP only
 
-  * Domain names
-  * ACME tokens
-  * Plesk output
-    Make sure log rotation and access permissions fit your policies.
+### Security Considerations
+
+⚠️ **Sensitive Data in Logs**
+
+Logs may contain:
+- Domain names
+- ACME challenge tokens (temporary, non-sensitive)
+- Plesk command output
+
+Ensure log rotation and access controls align with your security policies.
+
+⚠️ **Root Execution**
+
+The bot requires root access to execute Plesk commands. Consider:
+- Running via dedicated service account with sudo permissions
+- Implementing AppArmor/SELinux profiles (advanced)
+- Regular security audits of the codebase
 
 ---
 
-## Limitations / roadmap ideas
+## 🤝 Contributing
 
-* Currently tailored to **Domain-Robot** as DNS provider.
-* Uses `net.LookupTXT` and system resolver; no per-resolver configuration yet.
-* Does not auto-cleanup old `_acme-challenge` records (but updates the existing record in-place).
-* No concurrency per domain; domains are processed sequentially (which is fine for a small number of sites, but could be parallelized later).
+Contributions are welcome! Please follow these guidelines:
+
+1. **Fork** the repository
+2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
+3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
+4. **Push** to the branch (`git push origin feature/amazing-feature`)
+5. **Open** a Pull Request
+
+### Development Setup
+
+```bash
+git clone https://github.com/yourusername/dns01-bot.git
+cd dns01-bot
+
+# Install dependencies
+go mod download
+
+# Run tests
+go test ./...
+
+# Build
+go build -o dns01-bot .
+```
+
+### Reporting Issues
+
+Found a bug? Have a feature request?
+
+📝 [Open an issue](https://github.com/yourusername/dns01-bot/issues/new) with:
+- Detailed description
+- Steps to reproduce
+- Expected vs actual behavior
+- Relevant log excerpts
 
 ---
 
-## License
-This project is licensed under the [MIT License](./LICENSE).
+## 🗺️ Roadmap
+
+Planned features and improvements:
+
+- [ ] Support for additional DNS providers (Cloudflare, AWS Route53)
+- [ ] Parallel domain processing for faster execution
+- [ ] Webhook notifications (Slack, Discord, email)
+- [ ] Prometheus metrics endpoint
+- [ ] Docker container support
+- [ ] Systemd service integration
+- [ ] Web UI for configuration and monitoring
+- [ ] Automatic `_acme-challenge` record cleanup
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
+
+---
+
+## 🙏 Acknowledgments
+
+- [Plesk](https://www.plesk.com/) - Web hosting control panel
+- [Let's Encrypt](https://letsencrypt.org/) - Free SSL/TLS certificates
+- [Domain-Robot](https://www.domain-robot.de/) - Domain and DNS management API
+- [ACME Protocol](https://datatracker.ietf.org/doc/html/rfc8555) - RFC 8555
+
+---
+
+## 📞 Support
+
+Need help? Have questions?
+
+- 📖 [Documentation](https://github.com/yourusername/dns01-bot/wiki)
+- 💬 [Discussions](https://github.com/yourusername/dns01-bot/discussions)
+- 🐛 [Issue Tracker](https://github.com/yourusername/dns01-bot/issues)
+- 📧 Email: support@example.com
+
+---
+
+<div align="center">
+  
+**If this project helped you, please consider giving it a ⭐️!**
