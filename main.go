@@ -20,6 +20,8 @@ import (
 	"time"
 )
 
+// ---------- Types ----------
+
 type DomainConfig struct {
 	Domain string
 	Email  string
@@ -60,22 +62,62 @@ type Challenge struct {
 	Value string
 }
 
-// ---------- Konstante Defaults ----------
+type Config struct {
+	DomainRobot struct {
+		BaseURL  string
+		Email    string
+		Password string
+		OTP      string
+	}
+	RenewBeforeDays       int
+	DNSTimeout            time.Duration
+	DNSCheckInterval      time.Duration
+	ACMETTLSeconds        int
+	DomainsConfigPath     string
+}
+
+type apiResponse struct {
+	StatusCode int
+	Body       []byte
+}
+
+// ---------- Constants ----------
 
 const (
 	DefaultRenewBeforeDays         = 31
-	DefaultDNSTimeoutSeconds       = 600 // 10 Minuten
-	DefaultACMETTLSecs             = 60  // TTL für _acme-challenge
-	DefaultDNSCheckIntervalSeconds = 15  // Intervall für TXT-Check
+	DefaultDNSTimeoutSeconds       = 600
+	DefaultACMETTLSecs             = 60
+	DefaultDNSCheckIntervalSeconds = 15
 )
 
-// ---------- HTTP-Client mit Timeout ----------
+// ---------- HTTP Client ----------
 
 var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
-// ---------- Helpers ----------
+// ---------- Config Loading ----------
+
+func loadConfig() (*Config, error) {
+	cfg := &Config{}
+	
+	cfg.DomainRobot.BaseURL = strings.TrimRight(getEnvOrDefault("DR_BASE_URL", "https://domain-robot.de/api"), "/")
+	cfg.DomainRobot.Email = os.Getenv("DR_EMAIL")
+	cfg.DomainRobot.Password = os.Getenv("DR_PASS")
+	cfg.DomainRobot.OTP = os.Getenv("DR_OTP")
+	
+	if cfg.DomainRobot.Email == "" || cfg.DomainRobot.Password == "" {
+		return nil, errors.New("DR_EMAIL and DR_PASS must be set")
+	}
+	
+	cfg.RenewBeforeDays = parseIntEnv("RENEW_BEFORE_DAYS", DefaultRenewBeforeDays)
+	cfg.DNSTimeout = time.Duration(parseIntEnv("DNS_TIMEOUT_SECONDS", DefaultDNSTimeoutSeconds)) * time.Second
+	cfg.DNSCheckInterval = time.Duration(parseIntEnv("DNS_CHECK_INTERVAL_SECONDS", DefaultDNSCheckIntervalSeconds)) * time.Second
+	cfg.ACMETTLSeconds = parseIntEnv("ACME_TTL_SECONDS", DefaultACMETTLSecs)
+	cfg.DomainsConfigPath = getEnvOrDefault("DOMAINS_CONF", "/etc/dns01-bot/domains.conf")
+	
+	return cfg, nil
+}
 
 func getEnvOrDefault(key, def string) string {
 	val := os.Getenv(key)
@@ -97,7 +139,50 @@ func parseIntEnv(key string, def int) int {
 	return n
 }
 
-// ---------- TLS: Zertifikats-Check ----------
+// ---------- HTTP Helpers ----------
+
+func doRequest(req *http.Request) (*apiResponse, error) {
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			log.Printf("warning: closing response body failed: %v", cerr)
+		}
+	}()
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	
+	return &apiResponse{
+		StatusCode: resp.StatusCode,
+		Body:       body,
+	}, nil
+}
+
+func createMultipartForm(fields map[string]string) (*bytes.Buffer, string, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	
+	for key, val := range fields {
+		if val != "" {
+			if err := writer.WriteField(key, val); err != nil {
+				return nil, "", err
+			}
+		}
+	}
+	
+	if err := writer.Close(); err != nil {
+		return nil, "", err
+	}
+	
+	return &buf, writer.FormDataContentType(), nil
+}
+
+// ---------- TLS Certificate Check ----------
 
 func getCertExpiry(domain string) (time.Time, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
@@ -118,7 +203,20 @@ func getCertExpiry(domain string) (time.Time, error) {
 	return state.PeerCertificates[0].NotAfter, nil
 }
 
-// ---------- Plesk / SSL It! ----------
+func shouldRenewCertificate(domain string, renewBeforeDays int) (bool, error) {
+	notAfter, err := getCertExpiry(domain)
+	if err != nil {
+		log.Printf("[cert] could not get expiry for %s: %v (assuming renewal needed)", domain, err)
+		return true, nil
+	}
+	
+	days := int(time.Until(notAfter).Hours() / 24)
+	log.Printf("[cert] %s expires at %s (in %d days)", domain, notAfter.Format(time.RFC3339), days)
+	
+	return days <= renewBeforeDays, nil
+}
+
+// ---------- Plesk SSL It! ----------
 
 var (
 	hostRe  = regexp.MustCompile(`dnsRecordHost:\s*(\S+)`)
@@ -175,89 +273,79 @@ func runPleskContinue(domain, email string) error {
 	return nil
 }
 
-// ---------- Domain-Robot API ----------
+// ---------- Domain Robot Client ----------
 
-func loginDomainRobot(baseURL, email, pass, otp string) (string, error) {
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
+type DomainRobotClient struct {
+	baseURL string
+	token   string
+	client  *http.Client
+}
 
-	if err := writer.WriteField("email", email); err != nil {
-		return "", err
-	}
-	if err := writer.WriteField("password", pass); err != nil {
-		return "", err
-	}
-	if otp != "" {
-		if err := writer.WriteField("otp", otp); err != nil {
-			return "", err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("POST", baseURL+"/login", &buf)
+func NewDomainRobotClient(baseURL, email, password, otp string) (*DomainRobotClient, error) {
+	buf, contentType, err := createMultipartForm(map[string]string{
+		"email":    email,
+		"password": password,
+		"otp":      otp,
+	})
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("create login form: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", baseURL+"/login", buf)
+	if err != nil {
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
-	resp, err := httpClient.Do(req)
+	apiResp, err := doRequest(req)
 	if err != nil {
-		return "", fmt.Errorf("login request failed: %w", err)
+		return nil, err
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			log.Printf("warning: closing login response body failed: %v", cerr)
-		}
-	}()
 
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("login failed: %s: %s", resp.Status, string(b))
+	if apiResp.StatusCode != 200 {
+		return nil, fmt.Errorf("login failed: %d: %s", apiResp.StatusCode, string(apiResp.Body))
 	}
 
 	var lr LoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
-		return "", fmt.Errorf("decode login response: %w", err)
+	if err := json.Unmarshal(apiResp.Body, &lr); err != nil {
+		return nil, fmt.Errorf("decode login response: %w", err)
 	}
 	if lr.Token == "" {
-		return "", errors.New("empty token in login response")
+		return nil, errors.New("empty token in login response")
 	}
-	return lr.Token, nil
+
+	return &DomainRobotClient{
+		baseURL: baseURL,
+		token:   lr.Token,
+		client:  httpClient,
+	}, nil
 }
 
-func authRequest(req *http.Request, token string) {
-	req.Header.Set("Authorization", "Bearer "+token)
+func (c *DomainRobotClient) authRequest(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
 }
 
-func getZoneID(baseURL, token, domain string) (int64, error) {
-	url := baseURL + "/zones?full=true"
+func (c *DomainRobotClient) GetZoneID(domain string) (int64, error) {
+	url := c.baseURL + "/zones?full=true"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return 0, err
 	}
-	authRequest(req, token)
+	c.authRequest(req)
 
-	resp, err := httpClient.Do(req)
+	apiResp, err := doRequest(req)
 	if err != nil {
-		return 0, fmt.Errorf("zones request failed: %w", err)
+		return 0, err
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			log.Printf("warning: closing zones response body failed: %v", cerr)
-		}
-	}()
 
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("zones failed: %s: %s", resp.Status, string(b))
+	if apiResp.StatusCode != 200 {
+		return 0, fmt.Errorf("zones failed: %d: %s", apiResp.StatusCode, string(apiResp.Body))
 	}
 
 	var zr ZoneListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&zr); err != nil {
+	if err := json.Unmarshal(apiResp.Body, &zr); err != nil {
 		return 0, err
 	}
 
@@ -269,31 +357,25 @@ func getZoneID(baseURL, token, domain string) (int64, error) {
 	return 0, fmt.Errorf("zone for domain %s not found", domain)
 }
 
-func getZoneDetails(baseURL, token string, zoneID int64) (*ZoneDetailResponse, error) {
-	url := fmt.Sprintf("%s/zones/%d", baseURL, zoneID)
+func (c *DomainRobotClient) getZoneDetails(zoneID int64) (*ZoneDetailResponse, error) {
+	url := fmt.Sprintf("%s/zones/%d", c.baseURL, zoneID)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	authRequest(req, token)
+	c.authRequest(req)
 
-	resp, err := httpClient.Do(req)
+	apiResp, err := doRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("zone detail request failed: %w", err)
+		return nil, err
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			log.Printf("warning: closing zone detail response body failed: %v", cerr)
-		}
-	}()
 
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("zone detail failed: %s: %s", resp.Status, string(b))
+	if apiResp.StatusCode != 200 {
+		return nil, fmt.Errorf("zone detail failed: %d: %s", apiResp.StatusCode, string(apiResp.Body))
 	}
 
 	var zd ZoneDetailResponse
-	if err := json.NewDecoder(resp.Body).Decode(&zd); err != nil {
+	if err := json.Unmarshal(apiResp.Body, &zd); err != nil {
 		return nil, err
 	}
 	if len(zd.Data) == 0 {
@@ -302,8 +384,8 @@ func getZoneDetails(baseURL, token string, zoneID int64) (*ZoneDetailResponse, e
 	return &zd, nil
 }
 
-func upsertAcmeTXT(baseURL, token string, zoneID int64, subdomain, value string, ttl int) error {
-	zd, err := getZoneDetails(baseURL, token, zoneID)
+func (c *DomainRobotClient) UpsertAcmeTXT(zoneID int64, subdomain, value string, ttl int) error {
+	zd, err := c.getZoneDetails(zoneID)
 	if err != nil {
 		return err
 	}
@@ -318,89 +400,82 @@ func upsertAcmeTXT(baseURL, token string, zoneID int64, subdomain, value string,
 		}
 	}
 
-	// 1) FALL: es gibt noch keinen _acme-challenge -> anlegen (JSON wie bisher)
 	if existing == nil {
-		log.Printf("[dns] creating TXT %s.%s", subdomain, zone.Domain)
-		body := map[string]any{
-			"name":    subdomain,
-			"type":    "TXT",
-			"content": value,
-			"ttl":     ttl,
-		}
-		b, _ := json.Marshal(body)
-		url := fmt.Sprintf("%s/zones/%d", baseURL, zoneID)
-		req, err := http.NewRequest("POST", url, bytes.NewReader(b))
-		if err != nil {
-			return err
-		}
-		authRequest(req, token)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("create TXT request failed: %w", err)
-		}
-		defer func() {
-			if cerr := resp.Body.Close(); cerr != nil {
-				log.Printf("warning: closing create TXT response body failed: %v", cerr)
-			}
-		}()
-		if resp.StatusCode != 200 {
-			bb, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("create TXT failed: %s: %s", resp.Status, string(bb))
-		}
-		return nil
+		return c.createTXTRecord(zoneID, zone.Domain, subdomain, value, ttl)
 	}
 
-	// 2) FALL: Record existiert -> nur den Inhalt aktualisieren (multipart/form-data)
 	if existing.Content == value {
 		log.Printf("[dns] TXT %s.%s already has expected value, nothing to update",
 			subdomain, zone.Domain)
 		return nil
 	}
 
+	return c.updateTXTRecord(zoneID, existing.ID, zone.Domain, subdomain, value)
+}
+
+func (c *DomainRobotClient) createTXTRecord(zoneID int64, zoneDomain, subdomain, value string, ttl int) error {
+	log.Printf("[dns] creating TXT %s.%s", subdomain, zoneDomain)
+	
+	body := map[string]any{
+		"name":    subdomain,
+		"type":    "TXT",
+		"content": value,
+		"ttl":     ttl,
+	}
+	b, _ := json.Marshal(body)
+	
+	url := fmt.Sprintf("%s/zones/%d", c.baseURL, zoneID)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	c.authRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	apiResp, err := doRequest(req)
+	if err != nil {
+		return err
+	}
+	
+	if apiResp.StatusCode != 200 {
+		return fmt.Errorf("create TXT failed: %d: %s", apiResp.StatusCode, string(apiResp.Body))
+	}
+	return nil
+}
+
+func (c *DomainRobotClient) updateTXTRecord(zoneID, recordID int64, zoneDomain, subdomain, value string) error {
 	log.Printf("[dns] updating TXT %s.%s (recordID=%d) to value=%s",
-		subdomain, zone.Domain, existing.ID, value)
+		subdomain, zoneDomain, recordID, value)
 
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	// Feldname im API-Schema = "content"
-	if err := w.WriteField("name", "content"); err != nil {
-		return err
-	}
-	if err := w.WriteField("value", value); err != nil {
-		return err
-	}
-	if err := w.Close(); err != nil {
-		return err
-	}
-
-	url := fmt.Sprintf("%s/zones/%d/%d", baseURL, zoneID, existing.ID)
-	req, err := http.NewRequest("PUT", url, &buf)
+	buf, contentType, err := createMultipartForm(map[string]string{
+		"name":  "content",
+		"value": value,
+	})
 	if err != nil {
 		return err
 	}
-	authRequest(req, token)
-	req.Header.Set("Content-Type", w.FormDataContentType())
 
-	resp, err := httpClient.Do(req)
+	url := fmt.Sprintf("%s/zones/%d/%d", c.baseURL, zoneID, recordID)
+	req, err := http.NewRequest("PUT", url, buf)
 	if err != nil {
-		return fmt.Errorf("update TXT request failed: %w", err)
+		return err
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			log.Printf("warning: closing update TXT response body failed: %v", cerr)
-		}
-	}()
-	if resp.StatusCode != 200 {
-		bb, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("update TXT failed: %s: %s", resp.Status, string(bb))
+	c.authRequest(req)
+	req.Header.Set("Content-Type", contentType)
+
+	apiResp, err := doRequest(req)
+	if err != nil {
+		return err
+	}
+	
+	if apiResp.StatusCode != 200 {
+		return fmt.Errorf("update TXT failed: %d: %s", apiResp.StatusCode, string(apiResp.Body))
 	}
 
 	return nil
 }
 
-// ---------- DNS-Check ----------
+// ---------- DNS Verification ----------
 
 func waitForDNS(fqdn, expected string, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
@@ -425,7 +500,7 @@ func waitForDNS(fqdn, expected string, timeout, interval time.Duration) error {
 	}
 }
 
-// ---------- Domain-Config lesen ----------
+// ---------- Domain Config ----------
 
 func loadDomainsConfig(path string) ([]DomainConfig, error) {
 	f, err := os.Open(path)
@@ -457,24 +532,36 @@ func loadDomainsConfig(path string) ([]DomainConfig, error) {
 	return res, nil
 }
 
-// ---------- Main-Flow pro Domain ----------
+// ---------- Domain Processing ----------
 
-func processDomain(baseURL, token string, cfg DomainConfig, renewBeforeDays int, dnsTimeout, dnsInterval time.Duration, acmeTTL int) {
+func setupDNSChallenge(client *DomainRobotClient, domain string, chal *Challenge, acmeTTL int) error {
+	zoneID, err := client.GetZoneID(domain)
+	if err != nil {
+		return fmt.Errorf("get zone ID: %w", err)
+	}
+	
+	if err := client.UpsertAcmeTXT(zoneID, chal.Host, chal.Value, acmeTTL); err != nil {
+		return fmt.Errorf("upsert TXT: %w", err)
+	}
+	
+	return nil
+}
+
+func processDomain(client *DomainRobotClient, cfg DomainConfig, renewBeforeDays int, dnsTimeout, dnsInterval time.Duration, acmeTTL int) {
 	log.Printf("=== processing domain %s ===", cfg.Domain)
 
-	notAfter, err := getCertExpiry(cfg.Domain)
+	shouldRenew, err := shouldRenewCertificate(cfg.Domain, renewBeforeDays)
 	if err != nil {
-		log.Printf("[cert] could not get expiry for %s: %v (assuming we should try to issue)", cfg.Domain, err)
-	} else {
-		days := int(time.Until(notAfter).Hours() / 24)
-		log.Printf("[cert] %s expires at %s (in %d days)", cfg.Domain, notAfter.Format(time.RFC3339), days)
-		if days > renewBeforeDays {
-			log.Printf("[cert] %s has > %d days left, skipping", cfg.Domain, renewBeforeDays)
-			return
-		}
+		log.Printf("[cert] error checking certificate for %s: %v", cfg.Domain, err)
+		return
+	}
+	
+	if !shouldRenew {
+		log.Printf("[cert] %s has > %d days left, skipping", cfg.Domain, renewBeforeDays)
+		return
 	}
 
-	// 1) ACME-Challenge von Plesk holen
+	// 1) Get ACME challenge from Plesk
 	chal, err := runPleskIssue(cfg.Domain, cfg.Email)
 	if err != nil {
 		log.Printf("[plesk] issue failed for %s: %v", cfg.Domain, err)
@@ -482,25 +569,20 @@ func processDomain(baseURL, token string, cfg DomainConfig, renewBeforeDays int,
 	}
 	log.Printf("[plesk] challenge for %s: host=%s value=%s", cfg.Domain, chal.Host, chal.Value)
 
-	// 2) TXT upserten
-	zoneID, err := getZoneID(baseURL, token, cfg.Domain)
-	if err != nil {
-		log.Printf("[dns] getZoneID failed for %s: %v", cfg.Domain, err)
-		return
-	}
-	if err := upsertAcmeTXT(baseURL, token, zoneID, chal.Host, chal.Value, acmeTTL); err != nil {
-		log.Printf("[dns] upsert TXT failed for %s: %v", cfg.Domain, err)
+	// 2) Setup DNS challenge
+	if err := setupDNSChallenge(client, cfg.Domain, chal, acmeTTL); err != nil {
+		log.Printf("[dns] setup failed for %s: %v", cfg.Domain, err)
 		return
 	}
 
-	// 3) DNS warten
+	// 3) Wait for DNS propagation
 	fqdn := chal.Host + "." + cfg.Domain
 	if err := waitForDNS(fqdn, chal.Value, dnsTimeout, dnsInterval); err != nil {
 		log.Printf("[dns] waitForDNS failed for %s: %v", cfg.Domain, err)
 		return
 	}
 
-	// 4) Plesk continue
+	// 4) Complete Plesk certificate issuance
 	if err := runPleskContinue(cfg.Domain, cfg.Email); err != nil {
 		log.Printf("[plesk] continue failed for %s: %v", cfg.Domain, err)
 		return
@@ -509,48 +591,49 @@ func processDomain(baseURL, token string, cfg DomainConfig, renewBeforeDays int,
 	log.Printf("=== done for %s ===", cfg.Domain)
 }
 
-// ---------- main ----------
+// ---------- Main ----------
 
-func main() {
-	log.SetOutput(os.Stdout)
-	log.Println("dns01-bot starting")
-
-	baseURL := strings.TrimRight(getEnvOrDefault("DR_BASE_URL", "https://domain-robot.de/api"), "/")
-	drEmail := os.Getenv("DR_EMAIL")
-	drPass := os.Getenv("DR_PASS")
-	drOTP := os.Getenv("DR_OTP")
-	if drEmail == "" || drPass == "" {
-		log.Fatal("DR_EMAIL and DR_PASS must be set in environment")
+func run() error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
 
-	renewBeforeDays := parseIntEnv("RENEW_BEFORE_DAYS", DefaultRenewBeforeDays)
-	dnsTimeoutSec := parseIntEnv("DNS_TIMEOUT_SECONDS", DefaultDNSTimeoutSeconds)
-	dnsTimeout := time.Duration(dnsTimeoutSec) * time.Second
-
-	acmeTTLSec := parseIntEnv("ACME_TTL_SECONDS", DefaultACMETTLSecs)
-	dnsCheckIntervalSec := parseIntEnv("DNS_CHECK_INTERVAL_SECONDS", DefaultDNSCheckIntervalSeconds)
-	dnsInterval := time.Duration(dnsCheckIntervalSec) * time.Second
-
-	domainsPath := getEnvOrDefault("DOMAINS_CONF", "/etc/dns01-bot/domains.conf")
-	domains, err := loadDomainsConfig(domainsPath)
+	domains, err := loadDomainsConfig(cfg.DomainsConfigPath)
 	if err != nil {
-		log.Fatalf("could not load domains config: %v", err)
+		return fmt.Errorf("load domains config: %w", err)
 	}
 	if len(domains) == 0 {
 		log.Println("no domains configured, exiting")
-		return
+		return nil
 	}
 
-	// Login
-	token, err := loginDomainRobot(baseURL, drEmail, drPass, drOTP)
+	client, err := NewDomainRobotClient(
+		cfg.DomainRobot.BaseURL,
+		cfg.DomainRobot.Email,
+		cfg.DomainRobot.Password,
+		cfg.DomainRobot.OTP,
+	)
 	if err != nil {
-		log.Fatalf("login to Domain-Robot failed: %v", err)
+		return fmt.Errorf("login to Domain-Robot failed: %w", err)
 	}
 	log.Println("Domain-Robot login ok")
 
 	for _, d := range domains {
-		processDomain(baseURL, token, d, renewBeforeDays, dnsTimeout, dnsInterval, acmeTTLSec)
+		processDomain(client, d, cfg.RenewBeforeDays, cfg.DNSTimeout, cfg.DNSCheckInterval, cfg.ACMETTLSeconds)
 	}
 
+	return nil
+}
+
+func main() {
+	log.SetOutput(os.Stdout)
+	log.Println("dns01-bot starting")
+	
+	if err := run(); err != nil {
+		log.Printf("ERROR: %v", err)
+		os.Exit(1)
+	}
+	
 	log.Println("dns01-bot finished")
 }
