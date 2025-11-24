@@ -344,4 +344,4 @@ Use these to pinpoint whether the problem is on the Plesk side, Domain-Robot API
 ---
 
 ## License
-MIT 
+This project is licensed under the [MIT License](./LICENSE).
