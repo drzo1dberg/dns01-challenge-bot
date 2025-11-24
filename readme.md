@@ -1,11 +1,3 @@
----
-id: 1763990916-QUAA
-aliases:
-  - ODOO Artikel - DNS01 Challenge Bot
-tags: []
-title: DNS-01 Bot für Plesk & Domain-Robot
----
-
 # DNS-01 Bot für Plesk & Domain-Robot
 
 Automatisierte Verlängerung von **Wildcard-Zertifikaten (Let’s Encrypt)** auf unserem Plesk-Server per **DNS-01-Challenge** über die Domain-Robot-API.
