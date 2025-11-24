@@ -123,7 +123,7 @@ For each configured domain:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/dns01-bot.git
+git clone https://github.com/drzo1dberg/dns01-bot.git
 cd dns01-bot
 
 # Build binary
