@@ -278,7 +278,7 @@ func runPleskContinue(domain, email string) error {
 type DomainRobotClient struct {
 	baseURL string
 	token   string
-	client  *http.Client
+  //client  *http.Client
 }
 
 func NewDomainRobotClient(baseURL, email, password, otp string) (*DomainRobotClient, error) {
@@ -417,7 +417,7 @@ func (c *DomainRobotClient) createTXTRecord(zoneID int64, zoneDomain, subdomain,
 	log.Printf("[dns] creating TXT %s.%s", subdomain, zoneDomain)
 	
 	body := map[string]any{
-		"name":    subdomain,
+		"subdomain":    subdomain,
 		"type":    "TXT",
 		"content": value,
 		"ttl":     ttl,
