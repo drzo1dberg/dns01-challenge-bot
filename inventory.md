@@ -92,4 +92,5 @@ dns01-bot – File Inventory
   Beispiel-Eintrag:
     0 */12 * * * /usr/local/bin/dns01-bot-cron
 
-  - Führt den Bot alle 12
+  - Führt den Bot alle 12 Stunden aus.
+  - Konfiguration selbst liegt in /etc/dns01-bot/.env und /etc/dns01-bot/domains.conf
