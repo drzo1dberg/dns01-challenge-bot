@@ -121,22 +121,6 @@ For each configured domain:
 
 ## 🚀 Installation
 
-### Option 1: Download Pre-built Binary (Recommended)
-
-```bash
-# Download latest release
-wget https://github.com/yourusername/dns01-bot/releases/latest/download/dns01-bot
-
-# Install system-wide
-sudo mv dns01-bot /usr/local/bin/
-sudo chmod +x /usr/local/bin/dns01-bot
-
-# Verify installation
-dns01-bot --version
-```
-
-### Option 2: Build from Source
-
 ```bash
 # Clone repository
 git clone https://github.com/yourusername/dns01-bot.git
@@ -494,7 +478,7 @@ Contributions are welcome! Please follow these guidelines:
 ### Development Setup
 
 ```bash
-git clone https://github.com/yourusername/dns01-bot.git
+git clone https://github.com/drzo1dberg/dns01-bot.git
 cd dns01-bot
 
 # Install dependencies
@@ -511,26 +495,11 @@ go build -o dns01-bot .
 
 Found a bug? Have a feature request?
 
-📝 [Open an issue](https://github.com/yourusername/dns01-bot/issues/new) with:
+📝 [Open an issue](https://github.com/drzo1dberg/dns01-bot/issues/new) with:
 - Detailed description
 - Steps to reproduce
 - Expected vs actual behavior
 - Relevant log excerpts
-
----
-
-## 🗺️ Roadmap
-
-Planned features and improvements:
-
-- [ ] Support for additional DNS providers (Cloudflare, AWS Route53)
-- [ ] Parallel domain processing for faster execution
-- [ ] Webhook notifications (Slack, Discord, email)
-- [ ] Prometheus metrics endpoint
-- [ ] Docker container support
-- [ ] Systemd service integration
-- [ ] Web UI for configuration and monitoring
-- [ ] Automatic `_acme-challenge` record cleanup
 
 ---
 
@@ -553,13 +522,14 @@ This project is licensed under the MIT License - see the [LICENSE](./LICENSE) fi
 
 Need help? Have questions?
 
-- 📖 [Documentation](https://github.com/yourusername/dns01-bot/wiki)
-- 💬 [Discussions](https://github.com/yourusername/dns01-bot/discussions)
-- 🐛 [Issue Tracker](https://github.com/yourusername/dns01-bot/issues)
-- 📧 Email: support@example.com
+- 📖 [Documentation](https://github.com/drzo1dberg/dns01-bot/wiki)
+- 💬 [Discussions](https://github.com/drzo1dberg/dns01-bot/discussions)
+- 🐛 [Issue Tracker](https://github.com/drzo1dberg/dns01-bot/issues)
+- 📧 Email: nunesjacobs@insicuri.net
 
 ---
 
 <div align="center">
   
 **If this project helped you, please consider giving it a ⭐️!**
+</div>
