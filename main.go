@@ -106,6 +106,7 @@ func loadConfig() (*Config, error) {
 	cfg.DomainRobot.Email = os.Getenv("DR_EMAIL")
 	cfg.DomainRobot.Password = os.Getenv("DR_PASS")
 	cfg.DomainRobot.OTP = os.Getenv("DR_OTP")
+	cfg.DomainRobot.Token = os.Getenv("DR_TOKEN")
 
 	if cfg.DomainRobot.Token == "" && (cfg.DomainRobot.Email == "" || cfg.DomainRobot.Password == "") {
 		return nil, errors.New("either DR_TOKEN or (DR_EMAIL and DR_PASS) must be set")

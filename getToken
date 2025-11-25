@@ -1,0 +1,94 @@
+#!/bin/bash
+# filename: get-api-token-domainrobot
+set -euo pipefail
+
+# ---------------------------------------
+# Domain-Robot API credentials (hardcoded)
+# ---------------------------------------
+DR_BASE_URL="https://domain-robot.de/api"
+DR_EMAIL="EMAIL"
+DR_PASS="PASSWORD"
+
+# ---------------------------------------
+# Tools: curl, jq, optional: xclip/wl-copy/pbcopy/clip.exe
+# ---------------------------------------
+
+copy_to_clipboard() {
+  local data="$1"
+
+  if command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$data" | xclip -selection clipboard
+    echo "Token copied to clipboard via xclip."
+  elif command -v wl-copy >/dev/null 2>&1; then
+    printf '%s' "$data" | wl-copy
+    echo "Token copied to clipboard via wl-copy."
+  elif command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$data" | pbcopy
+    echo "Token copied to clipboard via pbcopy."
+  elif command -v clip.exe >/dev/null 2>&1; then
+    # praktisch für WSL unter Windows
+    printf '%s' "$data" | clip.exe
+    echo "Token copied to Windows clipboard via clip.exe."
+  else
+    echo "No clipboard tool found. Here is the token:"
+    echo "$data"
+    return 1
+  fi
+}
+
+echo "Domain-Robot login for: $DR_EMAIL"
+echo
+
+# OTP interaktiv abfragen
+read -rp "Domain-Robot OTP (leave empty if none): " DR_OTP
+
+# multipart/form-data Login
+echo
+echo "Logging in to Domain-Robot..."
+
+# curl-Aufruf bauen (OTP nur mitsenden, wenn nicht leer)
+if [[ -n "$DR_OTP" ]]; then
+  response="$(
+    curl -sS "$DR_BASE_URL/login" \
+      -H "Accept: application/json" \
+      -F "email=${DR_EMAIL}" \
+      -F "password=${DR_PASS}" \
+      -F "otp=${DR_OTP}"
+  )"
+else
+  response="$(
+    curl -sS "$DR_BASE_URL/login" \
+      -H "Accept: application/json" \
+      -F "email=${DR_EMAIL}" \
+      -F "password=${DR_PASS}"
+  )"
+fi
+
+# Token extrahieren
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required to parse the token, but was not found."
+  echo "Raw response:"
+  echo "$response"
+  exit 1
+fi
+
+token="$(printf '%s' "$response" | jq -r '.token // empty' 2>/dev/null || true)"
+
+if [[ -z "$token" ]]; then
+  echo "Login failed or no token in response."
+  echo "Raw response from server:"
+  echo "$response"
+  exit 1
+fi
+
+echo "Login successful."
+echo
+
+# Token in Zwischenablage legen
+copy_to_clipboard "$token" || true
+
+# Kurz zur Kontrolle anzeigen (nicht komplett ausschütten)
+echo
+echo "Token (first 60 chars):"
+printf '%s\n' "$token" | head -c 60
+echo
