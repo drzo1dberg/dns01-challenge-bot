@@ -68,6 +68,7 @@ type Config struct {
 		Email    string
 		Password string
 		OTP      string
+		Token    string
 	}
 	RenewBeforeDays   int
 	DNSTimeout        time.Duration
@@ -105,9 +106,10 @@ func loadConfig() (*Config, error) {
 	cfg.DomainRobot.Email = os.Getenv("DR_EMAIL")
 	cfg.DomainRobot.Password = os.Getenv("DR_PASS")
 	cfg.DomainRobot.OTP = os.Getenv("DR_OTP")
+	cfg.DomainRobot.Token = os.Getenv("DR_TOKEN")
 
-	if cfg.DomainRobot.Email == "" || cfg.DomainRobot.Password == "" {
-		return nil, errors.New("DR_EMAIL and DR_PASS must be set")
+	if cfg.DomainRobot.Token == "" && (cfg.DomainRobot.Email == "" || cfg.DomainRobot.Password == "") {
+		return nil, errors.New("either DR_TOKEN or (DR_EMAIL and DR_PASS) must be set")
 	}
 
 	cfg.RenewBeforeDays = parseIntEnv("RENEW_BEFORE_DAYS", DefaultRenewBeforeDays)
@@ -281,7 +283,17 @@ type DomainRobotClient struct {
 	client  *http.Client
 }
 
-func NewDomainRobotClient(baseURL, email, password, otp string) (*DomainRobotClient, error) {
+func NewDomainRobotClient(baseURL, email, password, otp, token string) (*DomainRobotClient, error) {
+
+	if token != "" {
+		log.Println("using provided token (skipping login)")
+		return &DomainRobotClient{
+			baseURL: baseURL,
+			token:   token,
+			client:  httpClient,
+		}, nil
+	}
+	log.Println("no token provided, performing login")
 	buf, contentType, err := createMultipartForm(map[string]string{
 		"email":    email,
 		"password": password,
@@ -613,11 +625,12 @@ func run() error {
 		cfg.DomainRobot.Email,
 		cfg.DomainRobot.Password,
 		cfg.DomainRobot.OTP,
+		cfg.DomainRobot.Token,
 	)
 	if err != nil {
 		return fmt.Errorf("login to Domain-Robot failed: %w", err)
 	}
-	log.Println("Domain-Robot login ok")
+	log.Println("Domain-Robot client initialized")
 
 	for _, d := range domains {
 		processDomain(client, d, cfg.RenewBeforeDays, cfg.DNSTimeout, cfg.DNSCheckInterval, cfg.ACMETTLSeconds)
