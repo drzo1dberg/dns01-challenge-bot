@@ -495,7 +495,7 @@ go build -o dns01-bot .
 
 Found a bug? Have a feature request?
 
-📝 [Open an issue](https://github.com/drzo1dberg/dns01-bot/issues/new) with:
+📝 [Open an issue](https://github.com/drzo1dberg/dns01-challenge-bot/issues/new) with:
 - Detailed description
 - Steps to reproduce
 - Expected vs actual behavior
@@ -523,8 +523,8 @@ This project is licensed under the MIT License - see the [LICENSE](./LICENSE) fi
 Need help? Have questions?
 
 - 📖 [Documentation](https://github.com/drzo1dberg/dns01-challenge-bot?tab=readme-ov-file#dns01-bot)
-- 💬 [Discussions](https://github.com/drzo1dberg/dns01-bot/discussions)
-- 🐛 [Issue Tracker](https://github.com/drzo1dberg/dns01-bot/issues)
+- 💬 [Discussions](https://github.com/drzo1dberg/dns01-challenge-bot/discussions)
+- 🐛 [Issue Tracker](https://github.com/drzo1dberg/dns01-challenge-bot/issues)
 - 📧 Email: nunesjacobs@insicuri.net
 
 ---
