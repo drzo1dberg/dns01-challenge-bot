@@ -69,11 +69,11 @@ type Config struct {
 		Password string
 		OTP      string
 	}
-	RenewBeforeDays       int
-	DNSTimeout            time.Duration
-	DNSCheckInterval      time.Duration
-	ACMETTLSeconds        int
-	DomainsConfigPath     string
+	RenewBeforeDays   int
+	DNSTimeout        time.Duration
+	DNSCheckInterval  time.Duration
+	ACMETTLSeconds    int
+	DomainsConfigPath string
 }
 
 type apiResponse struct {
@@ -100,22 +100,22 @@ var httpClient = &http.Client{
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{}
-	
+
 	cfg.DomainRobot.BaseURL = strings.TrimRight(getEnvOrDefault("DR_BASE_URL", "https://domain-robot.de/api"), "/")
 	cfg.DomainRobot.Email = os.Getenv("DR_EMAIL")
 	cfg.DomainRobot.Password = os.Getenv("DR_PASS")
 	cfg.DomainRobot.OTP = os.Getenv("DR_OTP")
-	
+
 	if cfg.DomainRobot.Email == "" || cfg.DomainRobot.Password == "" {
 		return nil, errors.New("DR_EMAIL and DR_PASS must be set")
 	}
-	
+
 	cfg.RenewBeforeDays = parseIntEnv("RENEW_BEFORE_DAYS", DefaultRenewBeforeDays)
 	cfg.DNSTimeout = time.Duration(parseIntEnv("DNS_TIMEOUT_SECONDS", DefaultDNSTimeoutSeconds)) * time.Second
 	cfg.DNSCheckInterval = time.Duration(parseIntEnv("DNS_CHECK_INTERVAL_SECONDS", DefaultDNSCheckIntervalSeconds)) * time.Second
 	cfg.ACMETTLSeconds = parseIntEnv("ACME_TTL_SECONDS", DefaultACMETTLSecs)
 	cfg.DomainsConfigPath = getEnvOrDefault("DOMAINS_CONF", "/etc/dns01-bot/domains.conf")
-	
+
 	return cfg, nil
 }
 
@@ -151,12 +151,12 @@ func doRequest(req *http.Request) (*apiResponse, error) {
 			log.Printf("warning: closing response body failed: %v", cerr)
 		}
 	}()
-	
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
-	
+
 	return &apiResponse{
 		StatusCode: resp.StatusCode,
 		Body:       body,
@@ -166,7 +166,7 @@ func doRequest(req *http.Request) (*apiResponse, error) {
 func createMultipartForm(fields map[string]string) (*bytes.Buffer, string, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-	
+
 	for key, val := range fields {
 		if val != "" {
 			if err := writer.WriteField(key, val); err != nil {
@@ -174,11 +174,11 @@ func createMultipartForm(fields map[string]string) (*bytes.Buffer, string, error
 			}
 		}
 	}
-	
+
 	if err := writer.Close(); err != nil {
 		return nil, "", err
 	}
-	
+
 	return &buf, writer.FormDataContentType(), nil
 }
 
@@ -209,10 +209,10 @@ func shouldRenewCertificate(domain string, renewBeforeDays int) (bool, error) {
 		log.Printf("[cert] could not get expiry for %s: %v (assuming renewal needed)", domain, err)
 		return true, nil
 	}
-	
+
 	days := int(time.Until(notAfter).Hours() / 24)
 	log.Printf("[cert] %s expires at %s (in %d days)", domain, notAfter.Format(time.RFC3339), days)
-	
+
 	return days <= renewBeforeDays, nil
 }
 
@@ -278,7 +278,7 @@ func runPleskContinue(domain, email string) error {
 type DomainRobotClient struct {
 	baseURL string
 	token   string
-  //client  *http.Client
+	client  *http.Client
 }
 
 func NewDomainRobotClient(baseURL, email, password, otp string) (*DomainRobotClient, error) {
@@ -415,15 +415,15 @@ func (c *DomainRobotClient) UpsertAcmeTXT(zoneID int64, subdomain, value string,
 
 func (c *DomainRobotClient) createTXTRecord(zoneID int64, zoneDomain, subdomain, value string, ttl int) error {
 	log.Printf("[dns] creating TXT %s.%s", subdomain, zoneDomain)
-	
+
 	body := map[string]any{
-		"subdomain":    subdomain,
+		"name":    subdomain,
 		"type":    "TXT",
 		"content": value,
 		"ttl":     ttl,
 	}
 	b, _ := json.Marshal(body)
-	
+
 	url := fmt.Sprintf("%s/zones/%d", c.baseURL, zoneID)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(b))
 	if err != nil {
@@ -436,7 +436,7 @@ func (c *DomainRobotClient) createTXTRecord(zoneID int64, zoneDomain, subdomain,
 	if err != nil {
 		return err
 	}
-	
+
 	if apiResp.StatusCode != 200 {
 		return fmt.Errorf("create TXT failed: %d: %s", apiResp.StatusCode, string(apiResp.Body))
 	}
@@ -467,7 +467,7 @@ func (c *DomainRobotClient) updateTXTRecord(zoneID, recordID int64, zoneDomain, 
 	if err != nil {
 		return err
 	}
-	
+
 	if apiResp.StatusCode != 200 {
 		return fmt.Errorf("update TXT failed: %d: %s", apiResp.StatusCode, string(apiResp.Body))
 	}
@@ -539,11 +539,11 @@ func setupDNSChallenge(client *DomainRobotClient, domain string, chal *Challenge
 	if err != nil {
 		return fmt.Errorf("get zone ID: %w", err)
 	}
-	
+
 	if err := client.UpsertAcmeTXT(zoneID, chal.Host, chal.Value, acmeTTL); err != nil {
 		return fmt.Errorf("upsert TXT: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -555,7 +555,7 @@ func processDomain(client *DomainRobotClient, cfg DomainConfig, renewBeforeDays 
 		log.Printf("[cert] error checking certificate for %s: %v", cfg.Domain, err)
 		return
 	}
-	
+
 	if !shouldRenew {
 		log.Printf("[cert] %s has > %d days left, skipping", cfg.Domain, renewBeforeDays)
 		return
@@ -629,11 +629,11 @@ func run() error {
 func main() {
 	log.SetOutput(os.Stdout)
 	log.Println("dns01-bot starting")
-	
+
 	if err := run(); err != nil {
 		log.Printf("ERROR: %v", err)
 		os.Exit(1)
 	}
-	
+
 	log.Println("dns01-bot finished")
 }
