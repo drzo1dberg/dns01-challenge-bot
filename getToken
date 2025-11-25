@@ -10,7 +10,7 @@ DR_EMAIL="EMAIL"
 DR_PASS="PASSWORD"
 
 # ---------------------------------------
-# Tools: curl, jq, optional: xclip/wl-copy/pbcopy/clip.exe
+# Required tools: curl, jq, optional: xclip/wl-copy/pbcopy/clip.exe
 # ---------------------------------------
 
 copy_to_clipboard() {
@@ -26,7 +26,7 @@ copy_to_clipboard() {
     printf '%s' "$data" | pbcopy
     echo "Token copied to clipboard via pbcopy."
   elif command -v clip.exe >/dev/null 2>&1; then
-    # praktisch für WSL unter Windows
+    # useful for WSL on Windows
     printf '%s' "$data" | clip.exe
     echo "Token copied to Windows clipboard via clip.exe."
   else
@@ -39,14 +39,14 @@ copy_to_clipboard() {
 echo "Domain-Robot login for: $DR_EMAIL"
 echo
 
-# OTP interaktiv abfragen
+# Prompt for OTP interactively
 read -rp "Domain-Robot OTP (leave empty if none): " DR_OTP
 
-# multipart/form-data Login
+# multipart/form-data login
 echo
 echo "Logging in to Domain-Robot..."
 
-# curl-Aufruf bauen (OTP nur mitsenden, wenn nicht leer)
+# Build curl command (only send OTP if not empty)
 if [[ -n "$DR_OTP" ]]; then
   response="$(
     curl -sS "$DR_BASE_URL/login" \
@@ -64,7 +64,7 @@ else
   )"
 fi
 
-# Token extrahieren
+# Extract token
 if ! command -v jq >/dev/null 2>&1; then
   echo "ERROR: jq is required to parse the token, but was not found."
   echo "Raw response:"
@@ -84,10 +84,10 @@ fi
 echo "Login successful."
 echo
 
-# Token in Zwischenablage legen
+# Copy token to clipboard
 copy_to_clipboard "$token" || true
 
-# Kurz zur Kontrolle anzeigen (nicht komplett ausschütten)
+# Show brief preview for verification (not the full token)
 echo
 echo "Token (first 60 chars):"
 printf '%s\n' "$token" | head -c 60
