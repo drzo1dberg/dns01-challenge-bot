@@ -1,5 +1,6 @@
 #!/bin/bash
 # filename: get-api-token-domainrobot
+# author: mnj@grothe.it
 set -euo pipefail
 
 # ---------------------------------------
