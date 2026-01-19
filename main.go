@@ -62,6 +62,11 @@ type Challenge struct {
 	Value string
 }
 
+type SSLItConfig struct {
+	SecureMail    bool
+	SecureWebmail bool
+}
+
 type Config struct {
 	DomainRobot struct {
 		BaseURL  string
@@ -221,8 +226,10 @@ func shouldRenewCertificate(domain string, renewBeforeDays int) (bool, error) {
 // ---------- Plesk SSL It! ----------
 
 var (
-	hostRe  = regexp.MustCompile(`dnsRecordHost:\s*(\S+)`)
-	valueRe = regexp.MustCompile(`dnsRecordValue:\s*(\S+)`)
+	hostRe        = regexp.MustCompile(`dnsRecordHost:\s*(\S+)`)
+	valueRe       = regexp.MustCompile(`dnsRecordValue:\s*(\S+)`)
+	mailCertRe    = regexp.MustCompile(`SSL/TLS certificate for mail:\s+(.+)`)
+	webmailCertRe = regexp.MustCompile(`SSL/TLS certificate for webmail:\s+(.+)`)
 )
 
 func parseChallenge(out string) (*Challenge, error) {
@@ -239,16 +246,47 @@ func parseChallenge(out string) (*Challenge, error) {
 	}, nil
 }
 
-func runPleskIssue(domain, email string) (*Challenge, error) {
-	cmd := exec.Command("plesk", "ext", "sslit", "--certificate", "-issue",
+func getPleskSSLConfig(domain string) *SSLItConfig {
+	cmd := exec.Command("plesk", "bin", "domain_pref", "-i", domain)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[plesk] domain_pref failed for %s: %v (using defaults: mail=true, webmail=true)", domain, err)
+		return &SSLItConfig{SecureMail: true, SecureWebmail: true}
+	}
+
+	output := string(out)
+	config := &SSLItConfig{}
+
+	if match := mailCertRe.FindStringSubmatch(output); len(match) > 1 {
+		config.SecureMail = strings.Contains(strings.ToLower(match[1]), "lets encrypt")
+	}
+
+	if match := webmailCertRe.FindStringSubmatch(output); len(match) > 1 {
+		config.SecureWebmail = strings.Contains(strings.ToLower(match[1]), "lets encrypt")
+	}
+
+	log.Printf("[plesk] SSL config for %s: mail=%v, webmail=%v", domain, config.SecureMail, config.SecureWebmail)
+	return config
+}
+
+func runPleskIssue(domain, email string, sslConfig *SSLItConfig) (*Challenge, error) {
+	args := []string{"ext", "sslit", "--certificate", "-issue",
 		"-domain", domain,
 		"-registrationEmail", email,
 		"-secure-domain",
 		"-wildcard",
-	)
+	}
 
+	if sslConfig.SecureMail {
+		args = append(args, "-secure-mail")
+	}
+	if sslConfig.SecureWebmail {
+		args = append(args, "-secure-webmail")
+	}
+
+	cmd := exec.Command("plesk", args...)
 	out, err := cmd.CombinedOutput()
-	log.Printf("[plesk issue] domain=%s out=\n%s", domain, string(out))
+	log.Printf("[plesk issue] domain=%s args=%v out=\n%s", domain, args, string(out))
 	if err != nil {
 		return nil, fmt.Errorf("plesk issue failed: %w", err)
 	}
@@ -573,28 +611,31 @@ func processDomain(client *DomainRobotClient, cfg DomainConfig, renewBeforeDays 
 		return
 	}
 
-	// 1) Get ACME challenge from Plesk
-	chal, err := runPleskIssue(cfg.Domain, cfg.Email)
+	// 1) Get current SSL It! configuration
+	sslConfig := getPleskSSLConfig(cfg.Domain)
+
+	// 2) Get ACME challenge from Plesk
+	chal, err := runPleskIssue(cfg.Domain, cfg.Email, sslConfig)
 	if err != nil {
 		log.Printf("[plesk] issue failed for %s: %v", cfg.Domain, err)
 		return
 	}
 	log.Printf("[plesk] challenge for %s: host=%s value=%s", cfg.Domain, chal.Host, chal.Value)
 
-	// 2) Setup DNS challenge
+	// 3) Setup DNS challenge
 	if err := setupDNSChallenge(client, cfg.Domain, chal, acmeTTL); err != nil {
 		log.Printf("[dns] setup failed for %s: %v", cfg.Domain, err)
 		return
 	}
 
-	// 3) Wait for DNS propagation
+	// 4) Wait for DNS propagation
 	fqdn := chal.Host + "." + cfg.Domain
 	if err := waitForDNS(fqdn, chal.Value, dnsTimeout, dnsInterval); err != nil {
 		log.Printf("[dns] waitForDNS failed for %s: %v", cfg.Domain, err)
 		return
 	}
 
-	// 4) Complete Plesk certificate issuance
+	// 5) Complete Plesk certificate issuance
 	if err := runPleskContinue(cfg.Domain, cfg.Email); err != nil {
 		log.Printf("[plesk] continue failed for %s: %v", cfg.Domain, err)
 		return
